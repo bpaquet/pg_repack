@@ -194,6 +194,7 @@ typedef struct repack_table
 	const char	   *create_trigger;	/* CREATE TRIGGER repack_trigger */
 	const char	   *enable_trigger;	/* ALTER TABLE ENABLE ALWAYS TRIGGER repack_trigger */
 	const char	   *create_table;	/* CREATE TABLE table AS SELECT WITH NO DATA*/
+	const char	   *replica_identity;	/* ALTER TABLE REPLICA IDENTITY*/
 	const char	   *copy_data;		/* INSERT INTO */
 	const char	   *alter_col_storage;	/* ALTER TABLE ALTER COLUMN SET STORAGE */
 	const char	   *drop_columns;	/* ALTER TABLE DROP COLUMNs */
@@ -255,6 +256,7 @@ static bool				dryrun = false;
 static unsigned int		temp_obj_num = 0; /* temporary objects counter */
 static bool				no_kill_backend = false; /* abandon when timed-out */
 static bool				no_superuser_check = false;
+static bool				replica_identity = false;
 static SimpleStringList	exclude_extension_list = {NULL, NULL}; /* don't repack tables of these extensions */
 static bool 			error_on_invalid_index = false; /* don't repack when invalid index is found */
 static int				switch_threshold = SWITCH_THRESHOLD_DEFAULT;
@@ -275,6 +277,7 @@ static pgut_option options[] =
 	{ 'l', 'I', "parent-table", &parent_table_list },
 	{ 'l', 'c', "schema", &schema_list },
 	{ 'b', 'n', "no-order", &noorder },
+	{ 'b', 'r', "replica-identity", &replica_identity },
 	{ 'b', 'N', "dry-run", &dryrun },
 	{ 's', 'o', "order-by", &orderby },
 	{ 's', 's', "tablespace", &tablespace },
@@ -742,6 +745,7 @@ repack_one_database(const char *orderby, char *errbuf, size_t errsize)
 	int						i;
 	int						num;
 	StringInfoData			sql;
+	StringInfoData			sql2;
 	SimpleStringListCell   *cell;
 	const char			  **params = NULL;
 	int						iparam = 0;
@@ -764,6 +768,7 @@ repack_one_database(const char *orderby, char *errbuf, size_t errsize)
 	params = pgut_malloc(num_params * sizeof(char *));
 
 	initStringInfo(&sql);
+	initStringInfo(&sql2);
 
 	reconnect(ERROR);
 
@@ -940,10 +945,23 @@ repack_one_database(const char *orderby, char *errbuf, size_t errsize)
 		appendStringInfoString(&sql, create_table_1);
 		appendStringInfoString(&sql, tablespace);
 		appendStringInfoString(&sql, create_table_2);
-
 		/* Always append WITH NO DATA to CREATE TABLE SQL*/
 		appendStringInfoString(&sql, " WITH NO DATA");
 		table.create_table = sql.data;
+
+		if (replica_identity) {
+			/* Craft ALTER TABLE REPLICA IDENTITY*/
+			char buffer[1024];
+			resetStringInfo(&sql2);
+			appendStringInfoString(&sql2, "ALTER TABLE ");
+			sprintf(buffer, "repack.table_%d", table.target_oid);
+			appendStringInfoString(&sql2, buffer);
+			appendStringInfoString(&sql2, " REPLICA IDENTITY FULL");
+			table.replica_identity = sql2.data;
+		}
+		else {
+			table.replica_identity = NULL;
+		}
 
 		/* Craft Copy SQL */
 		initStringInfo(&copy_sql);
@@ -1268,6 +1286,7 @@ repack_one_table(repack_table *table, const char *orderby)
 	elog(DEBUG2, "create_trigger    : %s", table->create_trigger);
 	elog(DEBUG2, "enable_trigger    : %s", table->enable_trigger);
 	elog(DEBUG2, "create_table      : %s", table->create_table);
+	elog(DEBUG2, "replica_identity  : %s", table->replica_identity);
 	elog(DEBUG2, "copy_data         : %s", table->copy_data);
 	elog(DEBUG2, "alter_col_storage : %s", table->alter_col_storage ?
 		 table->alter_col_storage : "(skipped)");
@@ -1533,6 +1552,8 @@ repack_one_table(repack_table *table, const char *orderby)
 	command(table->create_table, 0, NULL);
 	if (table->alter_col_storage)
 		command(table->alter_col_storage, 0, NULL);
+	if (table->replica_identity)
+		command(table->replica_identity, 0, NULL);
 	command(table->copy_data, 0, NULL);
 	temp_obj_num++;
 	printfStringInfo(&sql, "SELECT repack.disable_autovacuum('repack.table_%u')", table->target_oid);
@@ -2386,6 +2407,7 @@ pgut_help(bool details)
 	printf("  -Z, --no-analyze              don't analyze at end\n");
 	printf("  -k, --no-superuser-check      skip superuser checks in client\n");
 	printf("  -C, --exclude-extension       don't repack tables which belong to specific extension\n");
+	printf("  -r, --replica-identity        add replica identity full to the new table\n");
 	printf("      --error-on-invalid-index  don't repack tables which belong to specific extension\n");
 	printf("      --switch-threshold    switch tables when that many tuples are left to catchup\n");
 }
